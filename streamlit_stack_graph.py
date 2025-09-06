@@ -1,4 +1,5 @@
 
+
 import io
 import re
 import numpy as np
@@ -199,11 +200,11 @@ with st.sidebar:
     title = st.text_input("Título", value="")
     x_label = st.text_input("Rótulo X", value="A")
     y_label = st.text_input("Rótulo Y", value="D")
-    show_grid = st.checkbox("Mostrar grid", value=True)
+    show_grid = st.checkbox("Mostrar grid", value=False)
     show_range_slider = st.checkbox("Mostrar range slider do X", value=True)
     font_size = st.slider("Tamanho da fonte", 8, 28, 14)
-    line_width = st.slider("Espessura das linhas", 1, 8, 2)
-    panel_labels_str = st.text_input("Rótulos dos painéis (separados por vírgula)", value="")
+    line_width = st.slider("Espessura das linhas", 1, 8, 1)
+    panel_labels_str = st.text_input("Rótulos dos painéis (separados por vírgula)", value="B, D, F, H")
 
     same_y_panels = st.checkbox("Mesma escala Y em todos os painéis", value=True)
     frame_panels = st.checkbox("Borda preta nos painéis", value=True)
@@ -305,7 +306,7 @@ if files:
                                          line=dict(width=line_width), stackgroup="one"))
             else:
                 fig.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode="lines", name=tr["name"],
-                                         line=dict(width=line_width)))
+                                         line=dict(color="black", width=line_width)))
         if xr:
             fig.update_xaxes(range=xr)
         yr = apply_axis_preset(np.concatenate([t["y"] for t in all_traces]), y_preset, pad_pct, y_min, y_max)
@@ -325,11 +326,11 @@ if files:
 
     else:
         n = len(all_traces)
-        fig = make_subplots(rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.03)
+        fig = make_subplots(rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.02)
         labels = [s.strip() for s in panel_labels_str.split(",")] if panel_labels_str else []
         for i, tr in enumerate(all_traces, start=1):
             fig.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode="lines", name=tr["name"],
-                                     line=dict(width=line_width)), row=i, col=1)
+                                     line=dict(color="black", width=line_width)), row=i, col=1)
             # rótulo do painel (canto superior esquerdo)
             if i <= len(labels) and labels[i-1]:
                 fig.add_annotation(text=labels[i-1], xref=f"x{i} domain", yref=f"y{i}",
@@ -402,6 +403,14 @@ if files:
 
 else:
     st.info("Envie os arquivos para começar. Dica: **duplo-clique** no gráfico faz auto-zoom, e o **range slider** no X agiliza a navegação.")
+
+
+
+
+
+
+
+
 
 
 
