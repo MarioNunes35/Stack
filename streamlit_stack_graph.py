@@ -4,8 +4,11 @@ Streamlit app para plotar gráficos de linhas em:
 - Curvas sobrepostas (um eixo comum)
 - Painéis (small multiples) empilhados verticalmente, com eixos X/Y compartilhados
 
-Características:
-- Linhas pretas finas (estilo minimalista)
+Novidades:
+- Botão/controle para **suavizar curvas** (média móvel), com ajuste de janela
+- Ajuste de **espessura** e **cor da linha**
+- Ajuste de **tamanho dos textos** dos eixos (títulos) e dos **números** (ticks)
+- Linhas pretas finas por padrão (estilo minimalista)
 - Rótulos mestres dos eixos (A para X e D para Y, configuráveis)
 - Letras de identificação em cada painel (ex.: B, D, F, H)
 - Borda preta em cada painel (mirror nos eixos)
@@ -21,7 +24,6 @@ openpyxl>=3.1   # somente se for ler .xlsx
 
 import io
 import csv
-import math
 from typing import List, Optional
 
 import numpy as np
@@ -42,7 +44,7 @@ def to_numeric_series(arr_like):
 
 def read_table_auto(file, sep_opt: str = "auto", sheet_name: Optional[str] = None) -> pd.DataFrame:
     """Lê CSV/TXT/XLSX com separador detectado ou informado.
-    - sep_opt em {"auto", ",", ";", "\t"}
+    - sep_opt em {"auto", ",", ";", "	"}
     - Para XLSX, sheet_name pode ser None (primeira) ou nome/índice.
     """
     name = file.name.lower()
@@ -53,16 +55,15 @@ def read_table_auto(file, sep_opt: str = "auto", sheet_name: Optional[str] = Non
     # Detecta separador
     if sep_opt == "auto":
         sample = raw[:4096].decode("utf-8", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        dialect = None
         try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", " "])
+            dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "	", " "])
             sep = dialect.delimiter
         except Exception:
             # Heurística simples
-            if sample.count(";") > sample.count(",") and sample.count(";") >= sample.count("\t"):
+            if sample.count(";") > sample.count(",") and sample.count(";") >= sample.count("	"):
                 sep = ";"
-            elif sample.count("\t") >= sample.count(",") and sample.count("\t") >= sample.count(";"):
-                sep = "\t"
+            elif sample.count("	") >= sample.count(",") and sample.count("	") >= sample.count(";"):
+                sep = "	"
             else:
                 sep = ","
     else:
@@ -84,11 +85,26 @@ def ensure_labels(n: int, raw_labels: str) -> List[str]:
     # Completa se necessário
     if len(base) < n:
         alphabet = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
-        # Evita duplicar o que já existe
         extra = [ch for ch in alphabet if ch not in base]
         base += extra[: max(0, n - len(base))]
-    # Trunca
     return base[:n]
+
+
+def smooth_moving_average(y: np.ndarray, window: int) -> np.ndarray:
+    """Suaviza a série com média móvel (janela em pontos). Lida com NaNs por interpolação.
+    Se window <= 1 ou série vazia, retorna y sem alterações.
+    """
+    if y.size == 0 or window <= 1:
+        return y
+    w = int(max(1, round(window)))
+    # Interpola NaNs para evitar propagação
+    y2 = y.astype(float).copy()
+    nans = np.isnan(y2)
+    if nans.any():
+        idx = np.arange(y2.size)
+        y2[nans] = np.interp(idx[nans], idx[~nans], y2[~nans])
+    kernel = np.ones(w, dtype=float) / float(w)
+    return np.convolve(y2, kernel, mode="same")
 
 
 # -------------------------
@@ -101,19 +117,31 @@ st.title("Gráfico de Linhas • Curvas e Painéis (Plotly)")
 with st.sidebar:
     st.header("Dados")
     up = st.file_uploader("Carregar arquivo", type=["csv", "txt", "xlsx"], accept_multiple_files=False)
-    sep_opt = st.selectbox("Separador (CSV/TXT)", ["auto", ",", ";", "\t"], index=0)
+    sep_opt = st.selectbox("Separador (CSV/TXT)", ["auto", ",", ";", "	"], index=0)
 
     sheet_name = None
     if up is not None and up.name.lower().endswith(".xlsx"):
         sheet_name = st.text_input("Sheet (deixe vazio para primeira)", value="") or None
 
-    st.header("Colunas")
+    st.header("Colunas e modo")
     mode = st.radio("Modo de exibição", ["Painéis (small multiples)", "Curvas sobrepostas"], index=0)
 
-    st.header("Estilo")
+    st.header("Suavização")
+    do_smooth = st.checkbox("Aplicar suavização (média móvel)", value=False)
+    smooth_window = st.slider("Janela da média móvel (pontos)", min_value=3, max_value=501, value=21, step=2,
+                              help="Use número ímpar para resultados mais estáveis; aumenta = mais suave")
+
+    st.header("Estilo de linhas")
+    line_width = st.slider("Espessura das linhas", 0.5, 6.0, 1.0, step=0.5)
+    use_single_color = st.checkbox("Usar a mesma cor para todas as curvas", value=True)
+    line_color = st.color_picker("Cor da(s) linha(s)", value="#000000")
+
+    st.header("Textos e bordas")
     x_label = st.text_input("Rótulo do eixo X", value="A")
     y_label = st.text_input("Rótulo do eixo Y", value="D")
-    line_width = st.slider("Espessura das linhas", 0.5, 4.0, 1.0, step=0.5)
+    axis_title_size = st.slider("Tamanho do texto dos títulos dos eixos", 8, 36, 16)
+    tick_font_size = st.slider("Tamanho dos números (ticks)", 6, 28, 12)
+    panel_label_size = st.slider("Tamanho das letras dos painéis", 8, 30, 14)
     show_grid = st.checkbox("Mostrar grid", value=False)
     show_border = st.checkbox("Borda preta nos painéis", value=True)
 
@@ -132,19 +160,17 @@ if up is not None:
         st.stop()
 else:
     st.info("Nenhum arquivo carregado. Exibindo dados de exemplo.")
-    x = np.linspace(0, 10, 400)
+    x = np.linspace(0, 90, 2000)
     df = pd.DataFrame({
         "X": x,
-        "Y1": np.sin(x),
-        "Y2": np.cos(x),
-        "Y3": np.sin(2*x),
-        "Y4": np.cos(2*x),
+        "B": 2e3*np.exp(-(x-8)**2/8) + 3e3*np.exp(-(x-30)**2/2),
+        "D": np.linspace(80, 10, x.size),
+        "F": 1e3*np.sin(x/2) + 2e3*np.exp(-(x-53)**2/3) + 1e3*np.exp(-(x-60)**2/5),
+        "H": np.zeros_like(x)
     })
 
 # Seleção de colunas
-num_cols = df.select_dtypes(include=["number"]).columns.tolist()
 all_cols = df.columns.tolist()
-
 col1, col2 = st.columns([1, 2])
 with col1:
     x_col = st.selectbox("Coluna X", options=all_cols, index=0 if "X" not in all_cols else all_cols.index("X"))
@@ -168,11 +194,17 @@ ys = []
 for yc in y_cols:
     yv = to_numeric_series(df[yc].values)
     yv = yv[valid_mask]
+    if do_smooth:
+        yv = smooth_moving_average(yv, smooth_window)
     ys.append(yv)
 
 # -------------------------
 # Construção da figura
 # -------------------------
+
+common_axis_style = dict(showgrid=show_grid, zeroline=False)
+if show_border:
+    common_axis_style.update(dict(showline=True, linewidth=1, linecolor="black", mirror=True))
 
 if mode.startswith("Painéis"):
     nrows = len(ys)
@@ -191,13 +223,15 @@ if mode.startswith("Painéis"):
     )
 
     # Adiciona uma curva por painel
-    for i, yv in enumerate(ys, start=1):
+    for i, (yv, yc) in enumerate(zip(ys, y_cols), start=1):
+        color = line_color if use_single_color else None
         fig.add_trace(
             go.Scatter(
                 x=x_vals, y=yv,
                 mode="lines",
-                line=dict(color="black", width=line_width),
-                showlegend=False,
+                line=dict(color=color, width=line_width),
+                name=str(yc),
+                showlegend=False if use_single_color else True,
             ),
             row=i, col=1,
         )
@@ -208,19 +242,20 @@ if mode.startswith("Painéis"):
         plot_bgcolor="white",
         paper_bgcolor="white",
         margin=dict(l=70, r=30, t=30, b=50),
-        showlegend=False,
+        showlegend=False if use_single_color else True,
     )
 
-    # Grid e borda
-    fig.update_xaxes(showgrid=show_grid, zeroline=False)
-    fig.update_yaxes(showgrid=show_grid, zeroline=False)
+    # Grid/bordas + fontes dos ticks
+    fig.update_xaxes(**common_axis_style, tickfont=dict(size=tick_font_size))
+    fig.update_yaxes(**common_axis_style, tickfont=dict(size=tick_font_size))
 
-    if show_border:
-        fig.update_xaxes(showline=True, linewidth=1, linecolor="black", mirror=True)
-        fig.update_yaxes(showline=True, linewidth=1, linecolor="black", mirror=True)
+    # Tamanho dos títulos mestres dos eixos
+    fig.update_layout(
+        xaxis_title_font=dict(size=axis_title_size),
+        yaxis_title_font=dict(size=axis_title_size),
+    )
 
-    # === Rótulos de cada painel (CORREÇÃO do erro do xref) ===
-    # Usamos coordenadas relativas ao "paper" e a posição do domínio de cada eixo Y
+    # === Rótulos de cada painel (coordenadas do "paper") ===
     for i in range(1, nrows + 1):
         yax = fig.layout["yaxis" if i == 1 else f"yaxis{i}"]
         y0, y1 = yax.domain  # topo do domínio do subplot i
@@ -231,18 +266,19 @@ if mode.startswith("Painéis"):
             y=y1 - 0.01,      # um pouco abaixo do topo do painel
             xanchor="left", yanchor="top",
             showarrow=False,
-            font=dict(size=14, color="black"),
+            font=dict(size=panel_label_size, color="#000" if use_single_color else line_color),
         )
 
 else:
     # Curvas sobrepostas em um único eixo
     fig = go.Figure()
     for yv, yc in zip(ys, y_cols):
+        color = line_color if use_single_color else None
         fig.add_trace(
             go.Scatter(
                 x=x_vals, y=yv,
                 mode="lines",
-                line=dict(width=line_width),  # cores automáticas do Plotly
+                line=dict(color=color, width=line_width),
                 name=str(yc),
             )
         )
@@ -254,15 +290,16 @@ else:
         margin=dict(l=70, r=30, t=40, b=60),
         xaxis_title=x_label,
         yaxis_title=y_label,
-        showlegend=True,
+        showlegend=False if use_single_color else True,
     )
 
-    fig.update_xaxes(showgrid=show_grid, zeroline=False)
-    fig.update_yaxes(showgrid=show_grid, zeroline=False)
-
-    if show_border:
-        fig.update_xaxes(showline=True, linewidth=1, linecolor="black", mirror=True)
-        fig.update_yaxes(showline=True, linewidth=1, linecolor="black", mirror=True)
+    fig.update_xaxes(**common_axis_style, tickfont=dict(size=tick_font_size))
+    fig.update_yaxes(**common_axis_style, tickfont=dict(size=tick_font_size))
+    # Tamanhos dos títulos
+    fig.update_layout(
+        xaxis_title_font=dict(size=axis_title_size),
+        yaxis_title_font=dict(size=axis_title_size),
+    )
 
 # -------------------------
 # Renderização + Download (cliente)
@@ -280,8 +317,6 @@ st.plotly_chart(
             "width": 1200,
             "scale": 2,
         },
-        # Você pode habilitar/desabilitar botões da modebar aqui se quiser
-        # "modeBarButtonsToRemove": ["lasso2d", "select2d"],
     },
 )
 
@@ -290,10 +325,12 @@ with st.expander("ℹ️ Dicas e observações"):
     st.markdown(
         """
         - No modo **Painéis**, selecione **uma coluna Y por painel** (na ordem desejada).
-        - Para replicar o estilo da figura de referência, mantenha **linhas pretas finas**, **grid desligado**, **borda preta** e rótulos **X = A** e **Y = D**.
+        - Use **Aplicar suavização** para reduzir ruído (método média móvel). Ajuste a **janela** conforme a densidade de pontos.
+        - Ajuste **cor da linha**, **espessura**, **tamanho dos títulos** e **ticks** na barra lateral.
         - O botão de **download (câmera)** do Plotly funciona no Safari sem precisar de Kaleido/Chrome.
         """
     )
+
 
 
 
