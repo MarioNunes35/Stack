@@ -1,5 +1,4 @@
 
-
 import io
 import re
 import numpy as np
@@ -403,6 +402,7 @@ if files:
 
 else:
     st.info("Envie os arquivos para começar. Dica: **duplo-clique** no gráfico faz auto-zoom, e o **range slider** no X agiliza a navegação.")
+
 
 
 
