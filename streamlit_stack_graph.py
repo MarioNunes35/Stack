@@ -1,4 +1,5 @@
 
+
 import io
 import numpy as np
 import pandas as pd
@@ -314,5 +315,6 @@ if files:
         st.warning("Selecione pelo menos uma coluna Y em pelo menos um arquivo.")
 else:
     st.info("Envie os arquivos para começar. Dica: **duplo-clique** no gráfico faz auto-zoom, e o **range slider** no X agiliza a navegação.")
+
 
 
