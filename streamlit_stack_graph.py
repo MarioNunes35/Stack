@@ -1,203 +1,293 @@
-# Streamlit – Stack Graph (Origin-style) for Multiple Series
-# Author: ChatGPT (GPT-5 Thinking)
-# Description:
-#   Build stacked multi-panel (layers) or offset-overlaid plots from a single table
-#   of X plus multiple Y columns, similar to Origin's "Stack Graph". Supports
-#   vertical or horizontal stacking, optional axis exchange for horizontal stacks,
-#   adjustable spacing, smoothing, normalization, and one-axis-title mode.
 
 import io
-from typing import List, Dict, Tuple
-
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from scipy.signal import savgol_filter
-import plotly.io as pio
 
-st.set_page_config(page_title="Stack Graph – Multi-Layer/Offset", page_icon="🧮", layout="wide")
+st.set_page_config(page_title="Stack Graph Plotter", layout="wide")
 
-st.title("🧮 Stack Graph – Multi-Layer/Offset")
-st.caption("Empilhe curvas em painéis (layers) verticais ou horizontais, ou sobreponha com deslocamento (offset), no estilo do Stack Graph do Origin.")
+st.title("📈 Stack Graph Plotter")
+st.caption("Carregue CSV/TXT/Excel, selecione eixos e colunas, e gere gráfico de linhas ou área empilhada.")
 
-# ----------------------------- Sidebar Inputs ---------------------------- #
-st.sidebar.header("Entrada de Dados")
-files = st.sidebar.file_uploader("CSV com dados (1 arquivo)", type=["csv", "txt"], accept_multiple_files=False)
+# ============== I/O helpers ==============
+@st.cache_data(show_spinner=False)
+def robust_read_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Lê CSV/TXT/Excel de forma robusta (codificações/separadores) e retorna um DataFrame.
+    """
+    data = bytes(file_bytes)
+    bio = io.BytesIO(data)
+    sig = data[:8]
 
-if not files:
-    st.info("Envie um CSV contendo uma coluna X (opcional) e várias colunas Y.")
-    st.stop()
+    # Excel moderno (.xlsx) - ZIP magic
+    if sig[:2] == b'PK' or filename.lower().endswith(".xlsx"):
+        bio.seek(0)
+        return pd.read_excel(bio, engine="openpyxl")
 
-# Robust read (comma or semicolon; dot/comma decimals)
-@st.cache_data
-def robust_read_csv(file_bytes: bytes) -> pd.DataFrame:
-    from io import BytesIO
-    bio = BytesIO(file_bytes)
+    # Excel antigo (.xls) - OLE magic
+    if sig.startswith(b"\xD0\xCF\x11\xE0") or filename.lower().endswith(".xls"):
+        bio.seek(0)
+        return pd.read_excel(bio)  # engine auto
+
+    # CSV/TXT tentativas de codificação/sep/decimal
+    def try_read(enc, sep, dec, engine=None, enc_errors=None):
+        bio.seek(0)
+        return pd.read_csv(
+            bio,
+            encoding=enc,
+            sep=sep,
+            decimal=dec,
+            engine=engine,
+            encoding_errors=enc_errors,
+        )
+
+    encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1", "iso-8859-1", "utf-16", "utf-16-le", "utf-16-be"]
+    seps = [";", ",", "\t"]
+    decimals = [",", "."]
+
+    for enc in encodings:
+        for sep in seps:
+            for dec in decimals:
+                try:
+                    df = try_read(enc, sep, dec)
+                    if df.shape[1] == 1:
+                        # Tenta detecção mais flexível
+                        df2 = try_read(enc, sep, dec, engine="python")
+                        if df2.shape[1] > 1:
+                            return df2
+                    return df
+                except Exception:
+                    pass
+
+    # Última tentativa (bem permissiva)
+    bio.seek(0)
     try:
-        df = pd.read_csv(bio)
-        return df
+        return pd.read_csv(bio, engine="python", sep=None, encoding="latin1", encoding_errors="replace")
     except Exception:
         bio.seek(0)
-        try:
-            df = pd.read_csv(bio, sep=';')
-            return df
-        except Exception:
-            bio.seek(0)
-            df = pd.read_csv(bio, decimal=',', sep=';')
-            return df
+        return pd.read_table(bio, encoding="latin1", encoding_errors="replace")
 
-raw = robust_read_csv(files.getvalue())
-all_cols = list(raw.columns)
 
-st.sidebar.subheader("Mapeamento")
-col_x = st.sidebar.selectbox("Coluna X (opcional)", ["<None>"] + all_cols, index=0)
-ys = st.sidebar.multiselect("Colunas Y (uma ou mais)", all_cols, default=[c for c in all_cols if c != col_x][:4])
+def detect_numeric_columns(df: pd.DataFrame):
+    return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_datetime64_any_dtype(df[c])]
 
-if not ys:
-    st.warning("Selecione pelo menos uma coluna Y.")
-    st.stop()
 
-# Pre-processing options
-st.sidebar.subheader("Pré-processamento")
-normalize = st.sidebar.selectbox("Normalização Y", ["Nenhuma", "Min–Max (0–1)", "Dividir pelo máximo", "Z-score"], index=0)
-smooth_on = st.sidebar.checkbox("Suavizar (Savitzky–Golay)", value=False)
-sg_window = st.sidebar.slider("Janela SG (pontos, ímpar)", 5, 201, 21, step=2)
-sg_poly = st.sidebar.slider("Ordem SG", 2, 5, 3)
-
-# Layout options
-st.sidebar.header("Layout & Estilo")
-mode = st.sidebar.radio("Modo de plotagem", ["Multi-painel (empilhado)", "Offset sobreposto"], index=0)
-stack_dir = st.sidebar.radio("Direção do empilhamento", ["Vertical", "Horizontal"], index=0)
-exchange_axes = st.sidebar.checkbox("Horizontal com eixos trocados (X↔Y)", value=False, help="Análogo ao modo Horizontal (X–Y Axes Exchanged)")
-spacing = st.sidebar.slider("Espaçamento entre painéis (0=justo)", 0.0, 0.25, 0.05, step=0.01)
-show_one_axis_title = st.sidebar.checkbox("Mostrar um único título de eixo (global)", value=True)
-share_x = st.sidebar.checkbox("Compartilhar eixo X entre painéis", value=True)
-share_y = st.sidebar.checkbox("Compartilhar eixo Y entre painéis", value=False)
-
-# Offset options (for overlaid mode)
-offset_val = st.sidebar.number_input("Offset entre curvas (unidades Y)", value=0.0, step=0.1)
-offset_as_frac = st.sidebar.checkbox("Offset relativo ao range de cada série (\%)", value=True)
-offset_pct = st.sidebar.slider("Se relativo: % do range", 1, 200, 25)
-
-palette = st.sidebar.selectbox("Paleta de cores", ["Plotly", "Viridis", "Cividis", "Plasma", "Turbo"], index=0)
-
-# ------------------------------ Data Prep -------------------------------- #
-# Build X and Y matrix
-df = raw.copy()
-if col_x != "<None>":
-    x = pd.to_numeric(df[col_x], errors='coerce').to_numpy()
-else:
-    x = np.arange(len(df))
-
-Y = []
-labels = []
-for c in ys:
-    y = pd.to_numeric(df[c], errors='coerce').to_numpy()
-    if normalize == "Min–Max (0–1)":
-        mn, mx = np.nanmin(y), np.nanmax(y)
-        rng = mx - mn if mx > mn else 1.0
-        y = (y - mn) / rng
-    elif normalize == "Dividir pelo máximo":
-        mx = np.nanmax(np.abs(y))
-        y = y / (mx if mx else 1.0)
-    elif normalize == "Z-score":
-        mu, sd = np.nanmean(y), np.nanstd(y)
-        y = (y - mu) / (sd if sd else 1.0)
-    if smooth_on:
-        w = max(5, int(sg_window)); w += (w % 2 == 0)
-        try:
-            y = savgol_filter(y, window_length=w, polyorder=int(sg_poly))
-        except Exception:
-            pass
-    Y.append(y)
-    labels.append(str(c))
-
-n = len(Y)
-
-# Color sequence
-if palette == "Plotly":
-    colors = px_colors = [
-        "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"
+def guess_x_column(df: pd.DataFrame):
+    # Heurística por nomes comuns e pela primeira coluna numérica
+    candidates = [
+        "x","X","time","Time","tempo","Tempo","t","T",
+        "wavenumber","Wavenumber","frequency","Frequency",
+        "m/z","mz","MZ","temperature","Temperature","Temperatura","index","Index"
     ]
-elif palette == "Viridis":
-    colors = ["#440154","#482878","#3E4989","#31688E","#26828E","#1F9E89","#35B779","#6DCD59","#B4DE2C","#FDE725"]
-elif palette == "Cividis":
-    colors = ["#00224E","#25366F","#3F4A89","#5A5D9C","#7370A3","#8B84A2","#A29A98","#B9B08D","#D0C781","#E8DF74"]
-elif palette == "Plasma":
-    colors = ["#0d0887","#6a00a8","#b12a90","#e16462","#fca636","#fcffa4"]
-else:
-    colors = ["#30123B","#4145AB","#2CA6D8","#2AD4A5","#7CE080","#F9F871","#F6C64F","#F08E3E","#E84F3D","#D61E3C"]
+    for c in candidates:
+        if c in df.columns:
+            return c
+    nums = detect_numeric_columns(df)
+    if nums:
+        return nums[0]
+    return df.columns[0]
 
-# --------------------------- Plot Construction --------------------------- #
-if mode == "Multi-painel (empilhado)":
-    if stack_dir == "Vertical":
-        fig = make_subplots(rows=n, cols=1, shared_xaxes=share_x, shared_yaxes=share_y, vertical_spacing=spacing)
-        for i, (y, lab) in enumerate(zip(Y, labels), start=1):
-            fig.add_trace(go.Scatter(x=x, y=y, mode='lines', name=lab, line=dict(width=2), showlegend=False), row=i, col=1)
-            # Titles per layer as y-axis titles (or annotations)
-            fig.update_yaxes(title_text=lab if not show_one_axis_title else None, row=i, col=1)
-        if show_one_axis_title:
-            fig.update_yaxes(title_text="Y", row=int(np.ceil(n/2.0)), col=1)
-        fig.update_xaxes(title_text="X", row=n, col=1)
+
+def nice_first_valid(arr):
+    # Primeiro valor não-NaN
+    for v in arr:
+        if pd.notna(v):
+            return float(v)
+    return 0.0
+
+
+def apply_axis_preset(values, preset, pad_pct=2.0, vmin_in=None, vmax_in=None):
+    vals = np.array(values, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return None
+    vmin, vmax = float(np.min(vals)), float(np.max(vals))
+
+    if preset == "Auto (Plotly)":
+        return None
+    elif preset == "Dados (min → max)":
+        pass
+    elif preset == "0 → max":
+        vmin = 0.0
+    elif preset == "P1 → P99":
+        vmin, vmax = np.percentile(vals, [1, 99])
+    elif preset == "Custom":
+        if vmin_in is not None:
+            vmin = float(vmin_in)
+        if vmax_in is not None:
+            vmax = float(vmax_in)
+
+    span = vmax - vmin if vmax > vmin else (abs(vmax) if vmax != 0 else 1.0)
+    pad = (pad_pct / 100.0) * span
+    vmin -= pad
+    vmax += pad
+    return [vmin, vmax]
+
+
+# ============== Sidebar Controls ==============
+with st.sidebar:
+    st.header("⚙️ Opções do Gráfico")
+    chart_type = st.selectbox("Tipo", ["Linha", "Área empilhada"], index=0)
+
+    st.subheader("Ajuste Rápido dos Eixos")
+    x_preset = st.selectbox("X", ["Auto (Plotly)", "Dados (min → max)", "0 → max", "P1 → P99", "Custom"], index=0)
+    y_preset = st.selectbox("Y", ["Auto (Plotly)", "Dados (min → max)", "0 → max", "P1 → P99", "Custom"], index=0)
+
+    x_min = st.number_input("X min (se Custom)", value=None, placeholder="auto", step=1.0, format="%.6f") if x_preset == "Custom" else None
+    x_max = st.number_input("X max (se Custom)", value=None, placeholder="auto", step=1.0, format="%.6f") if x_preset == "Custom" else None
+    y_min = st.number_input("Y min (se Custom)", value=None, placeholder="auto", step=1.0, format="%.6f") if y_preset == "Custom" else None
+    y_max = st.number_input("Y max (se Custom)", value=None, placeholder="auto", step=1.0, format="%.6f") if y_preset == "Custom" else None
+    pad_pct = st.slider("Padding (%)", 0.0, 20.0, 2.0, 0.5)
+
+    st.subheader("Transformações Rápidas")
+    x_zero_min = st.checkbox("Fazer X iniciar em 0 (subtrai min de X)", value=False)
+    y_zero_first = st.checkbox("Fazer Y iniciar no 0 (subtrai o primeiro valor de cada série)", value=False)
+    y_norm_0_100 = st.checkbox("Normalizar Y para 0–100%", value=False)
+
+    st.subheader("Estilo")
+    title = st.text_input("Título", value="")
+    x_label = st.text_input("Rótulo X", value="")
+    y_label = st.text_input("Rótulo Y", value="")
+    show_grid = st.checkbox("Mostrar grid", value=True)
+    show_range_slider = st.checkbox("Mostrar range slider do X", value=True)
+    font_size = st.slider("Tamanho da fonte", 8, 28, 14)
+    line_width = st.slider("Espessura das linhas", 1, 8, 2)
+
+    st.subheader("Exportar")
+    filebase = st.text_input("Nome do arquivo", value="grafico")
+    export_scale = st.slider("Escala (resolução)", 1, 6, 3)
+    export_png = st.checkbox("Exportar PNG", value=True)
+    export_svg = st.checkbox("Exportar SVG", value=False)
+
+# ============== Main Area ==============
+files = st.file_uploader(
+    "Envie 1 ou mais arquivos (CSV, TXT, XLSX, XLS)",
+    type=["csv", "txt", "tsv", "dat", "xlsx", "xls"],
+    accept_multiple_files=True,
+)
+
+datasets = []
+
+if files:
+    for f in files:
+        try:
+            df = robust_read_any(f.getvalue(), f.name)
+        except Exception as e:
+            st.error(f"Falha ao ler **{f.name}**: {e}")
+            continue
+
+        # Mostra uma prévia
+        with st.expander(f"Prévia — {f.name}"):
+            st.dataframe(df.head(50), use_container_width=True)
+
+        # Seleções de colunas
+        num_cols = detect_numeric_columns(df)
+        default_x = guess_x_column(df)
+
+        st.markdown(f"#### Seleção de colunas — `{f.name}`")
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            x_col = st.selectbox(f"Coluna X ({f.name})", options=list(df.columns), index=list(df.columns).index(default_x) if default_x in df.columns else 0, key=f"x_{f.name}")
+        with c2:
+            y_options = [c for c in df.columns if c != x_col and (c in num_cols)]
+            if not y_options:
+                y_options = [c for c in df.columns if c != x_col]
+            y_cols = st.multiselect(f"Colunas Y ({f.name})", options=y_options, default=y_options[:1], key=f"ys_{f.name}")
+
+        datasets.append({
+            "df": df,
+            "x_col": x_col,
+            "y_cols": y_cols,
+            "label_prefix": f"{f.name} — "
+        })
+
+    # Construção do gráfico
+    if any(len(ds["y_cols"]) > 0 for ds in datasets):
+        fig = go.Figure()
+
+        all_x_vals = []
+        all_y_vals = []
+
+        for ds in datasets:
+            df = ds["df"]
+            if ds["x_col"] not in df.columns or len(ds["y_cols"]) == 0:
+                continue
+
+            # Extrai X e aplica transformações
+            x_raw = df[ds["x_col"]].values
+            # Tenta converter datas para numérico se forem datetimes -> plotly aceita datetimes também
+            if np.issubdtype(df[ds["x_col"]].dtype, np.datetime64):
+                x_vals = x_raw
+            else:
+                x_vals = pd.to_numeric(x_raw, errors="coerce")
+                if x_zero_min and np.isfinite(np.nanmin(x_vals)):
+                    x_vals = x_vals - np.nanmin(x_vals)
+
+            for ycol in ds["y_cols"]:
+                if ycol not in df.columns:
+                    continue
+                y_vals = pd.to_numeric(df[ycol].values, errors="coerce")
+                if y_zero_first:
+                    y_vals = y_vals - nice_first_valid(y_vals)
+                if y_norm_0_100:
+                    ymin = np.nanmin(y_vals)
+                    ymax = np.nanmax(y_vals)
+                    if np.isfinite(ymin) and np.isfinite(ymax) and ymax != ymin:
+                        y_vals = (y_vals - ymin) * 100.0 / (ymax - ymin)
+
+                name = f"{ds['label_prefix']}{ycol}"
+                if chart_type == "Linha":
+                    fig.add_trace(go.Scatter(x=x_vals, y=y_vals, mode="lines", name=name, line=dict(width=line_width)))
+                else:
+                    fig.add_trace(go.Scatter(x=x_vals, y=y_vals, mode="lines", name=name, stackgroup="one", line=dict(width=line_width)))
+
+                # agrega valores para presets
+                all_x_vals.extend(pd.to_datetime(x_vals) if np.issubdtype(df[ds["x_col"]].dtype, np.datetime64) else x_vals)
+                all_y_vals.extend(y_vals)
+
+        # Layout geral
+        fig.update_layout(
+            template="plotly_white",
+            title=dict(text=title or None, x=0.02, xanchor="left"),
+            legend=dict(font=dict(size=font_size), orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            xaxis=dict(title=x_label or None, showgrid=show_grid, rangeslider=dict(visible=show_range_slider)),
+            yaxis=dict(title=y_label or None, showgrid=show_grid),
+            font=dict(size=font_size),
+            margin=dict(l=60, r=20, b=60, t=60),
+            hovermode="x unified",
+        )
+
+        # Presets de eixo (aplicados se não for datetime)
+        if all_x_vals:
+            # Se o X for datetime, deixa o Plotly decidir (presets numéricos são menos úteis)
+            if not (datasets and np.issubdtype(datasets[0]["df"][datasets[0]["x_col"]].dtype, np.datetime64)):
+                xr = apply_axis_preset(all_x_vals, x_preset, pad_pct, x_min, x_max)
+                if xr:
+                    fig.update_xaxes(range=xr)
+
+        if all_y_vals:
+            yr = apply_axis_preset(all_y_vals, y_preset, pad_pct, y_min, y_max)
+            if yr:
+                fig.update_yaxes(range=yr)
+
+        st.plotly_chart(fig, use_container_width=True, theme=None)
+
+        # Exportar
+        try:
+            btns = []
+            if export_png:
+                png_bytes = fig.to_image(format="png", scale=export_scale)
+                st.download_button("💾 Baixar PNG", data=png_bytes, file_name=f"{filebase}.png", mime="image/png")
+            if export_svg:
+                svg_bytes = fig.to_image(format="svg", scale=export_scale)
+                st.download_button("💾 Baixar SVG", data=svg_bytes, file_name=f"{filebase}.svg", mime="image/svg+xml")
+        except Exception as e:
+            st.info("Para exportar imagens, garanta que **kaleido** esteja instalado no ambiente (requirements.txt).")
+            st.exception(e)
+
     else:
-        # Horizontal stacking: either exchange axes or not
-        fig = make_subplots(rows=1, cols=n, shared_xaxes=share_x, shared_yaxes=share_y, horizontal_spacing=spacing)
-        for j, (y, lab) in enumerate(zip(Y, labels), start=1):
-            xx, yy = (y, x) if exchange_axes else (x, y)
-            fig.add_trace(go.Scatter(x=xx, y=yy, mode='lines', name=lab, line=dict(width=2), showlegend=False), row=1, col=j)
-            fig.update_yaxes(title_text=lab if not show_one_axis_title else None, row=1, col=j)
-        if show_one_axis_title:
-            fig.update_yaxes(title_text="Y", row=1, col=int(np.ceil(n/2.0)))
-        fig.update_xaxes(title_text="X", row=1, col=int(np.ceil(n/2.0)))
+        st.warning("Selecione pelo menos uma coluna Y em pelo menos um arquivo.")
 else:
-    # Offset overlay in a single axes
-    fig = go.Figure()
-    # Compute offsets
-    offsets = []
-    if offset_as_frac:
-        for y in Y:
-            rng = float(np.nanmax(y) - np.nanmin(y)) or 1.0
-            offsets.append(rng * (offset_pct/100.0))
-    else:
-        offsets = [offset_val] * n
-    current_shift = 0.0
-    for i, (y, lab) in enumerate(zip(Y, labels)):
-        fig.add_trace(go.Scatter(x=x, y=y + current_shift, mode='lines', name=lab, line=dict(width=2)))
-        current_shift += offsets[i] if i < len(offsets) else 0.0
-    fig.update_xaxes(title_text="X")
-    fig.update_yaxes(title_text="Y (offset)")
+    st.info("Envie os arquivos para começar. Dica: **duplo-clique** no gráfico faz auto-zoom, e o **range slider** no X agiliza a navegação.")
 
-# Apply colorway
-fig.update_layout(template='plotly_dark', height=max(400, 220*n if mode.startswith("Multi") and stack_dir=="Vertical" else 600))
-fig.update_layout(colorway=colors)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# ------------------------------- Export ---------------------------------- #
-st.subheader("Exportar figura")
-html = pio.to_html(fig, include_plotlyjs='cdn', full_html=False)
-st.download_button("⬇️ Baixar HTML interativo", data=html, file_name="stack_graph.html")
-
-png_ok = st.checkbox("Exportar PNG (requer 'kaleido' instalado)", value=False)
-if png_ok:
-    try:
-        import kaleido  # noqa: F401
-        png_bytes = pio.to_image(fig, format='png', scale=2)
-        st.download_button("⬇️ Baixar PNG", data=png_bytes, file_name="stack_graph.png")
-    except Exception as e:
-        st.warning(f"PNG indisponível: instale 'kaleido'. Erro: {e}")
-
-# ------------------------------- Help ------------------------------------ #
-with st.expander("Dicas & Notas"):
-    st.markdown(
-        """
-        - **Multi-painel (empilhado):** cada coluna Y vira um *layer*. Você escolhe empilhar **Vertical** (linhas) ou **Horizontal** (colunas). 
-        - **Horizontal com eixos trocados (X↔Y):** troca os eixos para reproduzir o comportamento "Horizontal (X–Y Axes Exchanged)".
-        - **Compartilhar eixos:** compartilhe X e/ou Y para escalas comuns; títulos por layer podem ser ocultos com "Mostrar um único título".
-        - **Offset sobreposto:** plota tudo num único painel, aplicando deslocamento cumulativo (fixo ou relativo ao range de cada série).
-        - **Suavização SG:** útil para sinais ruidosos; use uma janela ímpar (5, 7, 9, ...).
-        - **Exportação:** baixe HTML interativo (funciona sem dependências) e, opcionalmente, PNG via *kaleido*.
-        """
-    )
