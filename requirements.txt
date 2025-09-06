@@ -2,10 +2,10 @@ streamlit
 numpy
 pandas
 scipy
-plotly==5.22.0   
+plotly
 matplotlib   
 PyPDF2     
 flask    
-kaleido==0.2.1.post1
+kaleido
 openpyxl
 
