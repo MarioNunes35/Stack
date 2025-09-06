@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.io as pio
 
 st.set_page_config(page_title="Stack Graph Plotter", layout="wide")
 
@@ -157,8 +158,10 @@ with st.sidebar:
     st.subheader("Exportar")
     filebase = st.text_input("Nome do arquivo", value="grafico")
     export_scale = st.slider("Escala (resolução)", 1, 6, 3)
-    export_png = st.checkbox("Exportar PNG", value=True)
-    export_svg = st.checkbox("Exportar SVG", value=False)
+    use_server_export = st.checkbox("Usar exportação no servidor (Kaleido)", value=False, help="Requer Kaleido funcional no servidor. Se desligado, use o botão da câmera no gráfico (cliente).")
+    export_png = st.checkbox("Exportar PNG (servidor)", value=True, disabled=not use_server_export)
+    export_svg = st.checkbox("Exportar SVG (servidor)", value=False, disabled=not use_server_export)
+    export_html = st.checkbox("Exportar HTML interativo", value=True)
 
 # ============== Main Area ==============
 files = st.file_uploader(
@@ -260,7 +263,6 @@ if files:
 
         # Presets de eixo (aplicados se não for datetime)
         if all_x_vals:
-            # Se o X for datetime, deixa o Plotly decidir (presets numéricos são menos úteis)
             if not (datasets and np.issubdtype(datasets[0]["df"][datasets[0]["x_col"]].dtype, np.datetime64)):
                 xr = apply_axis_preset(all_x_vals, x_preset, pad_pct, x_min, x_max)
                 if xr:
@@ -271,23 +273,46 @@ if files:
             if yr:
                 fig.update_yaxes(range=yr)
 
-        st.plotly_chart(fig, use_container_width=True, theme=None)
+        # ---- Client-side export config (no Chrome/Kaleido needed) ----
+        plot_config = {
+            "displaylogo": False,
+            "toImageButtonOptions": {
+                "format": "png",
+                "filename": filebase,
+                "scale": export_scale,
+                "height": None,
+                "width": None,
+            }
+        }
+        st.plotly_chart(fig, use_container_width=True, theme=None, config=plot_config)
 
-        # Exportar
-        try:
-            btns = []
-            if export_png:
-                png_bytes = fig.to_image(format="png", scale=export_scale)
-                st.download_button("💾 Baixar PNG", data=png_bytes, file_name=f"{filebase}.png", mime="image/png")
-            if export_svg:
-                svg_bytes = fig.to_image(format="svg", scale=export_scale)
-                st.download_button("💾 Baixar SVG", data=svg_bytes, file_name=f"{filebase}.svg", mime="image/svg+xml")
-        except Exception as e:
-            st.info("Para exportar imagens, garanta que **kaleido** esteja instalado no ambiente (requirements.txt).")
-            st.exception(e)
+        st.markdown("Dica: use o **ícone da câmera** no canto do gráfico para baixar PNG em alta (cliente).")
+
+        # ---- Optional server-side export (Kaleido) ----
+        if use_server_export:
+            try:
+                if export_png:
+                    png_bytes = pio.to_image(fig, format="png", scale=export_scale)
+                    st.download_button("💾 Baixar PNG (servidor)", data=png_bytes, file_name=f"{filebase}.png", mime="image/png")
+                if export_svg:
+                    svg_bytes = pio.to_image(fig, format="svg", scale=export_scale)
+                    st.download_button("💾 Baixar SVG (servidor)", data=svg_bytes, file_name=f"{filebase}.svg", mime="image/svg+xml")
+            except Exception as e:
+                st.warning("Exportação no servidor falhou (Kaleido/Chrome ausente). Use o botão da câmera no gráfico.")
+                st.exception(e)
+
+        # ---- HTML interactive export ----
+        if export_html:
+            try:
+                html_str = pio.to_html(fig, include_plotlyjs="cdn", full_html=False, config=plot_config)
+                st.download_button("🌐 Baixar HTML interativo", data=html_str.encode("utf-8"), file_name=f"{filebase}.html", mime="text/html")
+            except Exception as e:
+                st.warning("Falha ao gerar HTML.")
+                st.exception(e)
 
     else:
         st.warning("Selecione pelo menos uma coluna Y em pelo menos um arquivo.")
 else:
     st.info("Envie os arquivos para começar. Dica: **duplo-clique** no gráfico faz auto-zoom, e o **range slider** no X agiliza a navegação.")
+
 
