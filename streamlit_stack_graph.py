@@ -1,4 +1,5 @@
 
+
 import io
 import re
 import numpy as np
@@ -97,8 +98,33 @@ def nice_first_valid(arr):
     return 0.0
 
 
-def to_numeric_series(s):
-    return pd.to_numeric(s, errors="coerce").to_numpy(dtype=float)
+def to_numeric_series(s, allow_datetime=False):
+    """Converte Series/ndarray/list para ndarray float (ou datetime64 se allow_datetime=True)."""
+    import pandas as pd
+    import numpy as np
+    # Se vier DataFrame, pega a primeira coluna
+    if hasattr(s, 'ndim') and getattr(s, 'ndim', 1) == 2:
+        try:
+            s = s.iloc[:, 0]
+        except Exception:
+            pass
+    # Se for pandas Series/Index, checa datetime
+    if hasattr(s, 'dtype'):
+        try:
+            if allow_datetime and (pd.api.types.is_datetime64_any_dtype(s.dtype) or pd.api.types.is_timedelta64_dtype(s.dtype)):
+                return s.to_numpy()
+        except Exception:
+            pass
+        try:
+            return pd.to_numeric(s, errors='coerce').to_numpy(dtype=float)
+        except Exception:
+            return pd.to_numeric(pd.Series(np.asarray(s)), errors='coerce').to_numpy(dtype=float)
+    # Caso geral: array/list
+    try:
+        arr = pd.to_numeric(s, errors='coerce')
+        return np.asarray(arr, dtype=float)
+    except Exception:
+        return pd.to_numeric(pd.Series(np.asarray(s)), errors='coerce').to_numpy(dtype=float)
 
 
 def apply_axis_preset(values, preset, pad_pct=2.0, vmin_in=None, vmax_in=None):
@@ -226,10 +252,10 @@ if files:
                 continue
 
             for (x_col, y_col) in sel_pairs:
-                x_vals = to_numeric_series(df[x_col].values)
+                x_vals = to_numeric_series(df[x_col])
                 if x_zero_min and np.isfinite(np.nanmin(x_vals)):
                     x_vals = x_vals - np.nanmin(x_vals)
-                y_vals = to_numeric_series(df[y_col].values)
+                y_vals = to_numeric_series(df[y_col])
                 if y_zero_first:
                     y_vals = y_vals - nice_first_valid(y_vals)
                 if y_norm_0_100:
@@ -251,12 +277,12 @@ if files:
             default_ys = [c for c in y_options if is_convertible(c)]
             y_cols = st.multiselect(f"Colunas Y ({f.name})", options=y_options, default=default_ys if default_ys else y_options[:1], key=f"ys_{f.name}")
 
-            x_vals_raw = to_numeric_series(df[x_col].values)
+            x_vals_raw = to_numeric_series(df[x_col])
             if x_zero_min and np.isfinite(np.nanmin(x_vals_raw)):
                 x_vals_raw = x_vals_raw - np.nanmin(x_vals_raw)
 
             for ycol in y_cols:
-                y_vals = to_numeric_series(df[ycol].values)
+                y_vals = to_numeric_series(df[ycol])
                 if y_zero_first:
                     y_vals = y_vals - nice_first_valid(y_vals)
                 if y_norm_0_100:
@@ -377,6 +403,7 @@ if files:
 
 else:
     st.info("Envie os arquivos para começar. Dica: **duplo-clique** no gráfico faz auto-zoom, e o **range slider** no X agiliza a navegação.")
+
 
 
 
