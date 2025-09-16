@@ -1,3 +1,91 @@
+# =============================================================================
+# ===== INÍCIO DO CÓDIGO DE PROTEÇÃO PADRÃO ===================================
+# =============================================================================
+import streamlit as st
+import hmac
+import hashlib
+import time
+
+def verify_auth_token(token: str, secret_key: str) -> tuple:
+    """Verifica um token de autenticação HMAC-SHA256 com timestamp."""
+    try:
+        parts = token.split(':')
+        if len(parts) != 3:
+            return False, None
+        
+        email, timestamp, signature = parts
+        
+        # 1. Verifica se o token expirou (validade de 1 hora)
+        if int(time.time()) - int(timestamp) > 3600:
+            st.error("Token de autenticação expirado.")
+            return False, None
+        
+        # 2. Recria a assinatura esperada para verificação
+        message = f"{email}:{timestamp}"
+        expected_signature = hmac.new(secret_key.encode(), message.encode(), hashlib.sha256).hexdigest()
+        
+        # 3. Compara as assinaturas de forma segura
+        if hmac.compare_digest(signature, expected_signature):
+            return True, email
+        else:
+            st.error("Token de autenticação inválido.")
+            return False, None
+            
+    except Exception as e:
+        st.error(f"Erro ao verificar token: {e}")
+        return False, None
+
+# --- Lógica Principal de Autenticação ---
+query_params = st.query_params
+token = query_params.get("auth_token")
+
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+
+if token and not st.session_state.authenticated:
+    try:
+        auth_secrets = st.secrets.get("auth", {})
+        secret_key = auth_secrets.get("token_secret_key")
+
+        if secret_key:
+            is_valid, email = verify_auth_token(token, secret_key)
+            if is_valid:
+                st.session_state.authenticated = True
+                st.session_state.user_email = email
+        else:
+            st.error("Chave secreta de autenticação não configurada no aplicativo.")
+            
+    except Exception as e:
+        st.error(f"Ocorreu um erro durante a autenticação: {e}")
+
+# --- Barreira de Acesso ---
+if not st.session_state.get('authenticated'):
+    st.title("🔐 Acesso Restrito")
+    st.error("Este aplicativo requer autenticação. Por favor, faça o login através do portal.")
+    
+    # ❗️❗️❗️ ALTERE A URL ABAIXO ❗️❗️❗️
+    st.link_button(
+        "Ir para o Portal de Login",
+        "https://app-unificadopy-j9wgzbt2sqm5pgaeqzxyme.streamlit.app/", # <-- URL DO SEU PORTAL PRINCIPAL
+        use_container_width=True,
+        type="primary"
+    )
+    st.stop()
+
+# Mensagem de boas-vindas para o usuário autenticado
+st.success(f"Autenticação bem-sucedida! Bem-vindo, {st.session_state.get('user_email', 'usuário')}.")
+# =============================================================================
+# ===== FIM DO CÓDIGO DE PROTEÇÃO PADRÃO =====================================
+# =============================================================================
+
+
+# O CÓDIGO PRINCIPAL DO SEU APLICATIVO COMEÇA AQUI
+# Exemplo:
+st.title("Meu Novo Aplicativo Protegido")
+st.write("Este conteúdo só é visível para usuários autenticados.")
+
+# ... resto do seu código ...
+
 # -*- coding: utf-8 -*-
 """
 Streamlit app para plotar gráficos de linhas em:
