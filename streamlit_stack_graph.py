@@ -1,3 +1,96 @@
+import streamlit as st
+import hashlib
+from datetime import datetime, timezone
+from st_supabase_connection import SupabaseConnection
+import time # <<< Adicionado para a pausa
+
+# =============================================================================
+# ===== INÍCIO DO CÓDIGO DE PROTEÇÃO FINAL ====================================
+# =============================================================================
+def init_connection():
+    """Inicializa conexão com Supabase. Requer secrets configurados."""
+    try:
+        return st.connection("supabase", type=SupabaseConnection)
+    except Exception as e:
+        st.error(f"Erro ao conectar com Supabase: {e}")
+        return None
+
+def verify_and_consume_nonce(token: str) -> tuple[bool, str | None]:
+    """Verifica um token de uso único (nonce) no banco de dados e o consome."""
+    conn = init_connection()
+    if not conn:
+        return False, None
+
+    try:
+        # 1. Cria o hash do token recebido para procurar no banco
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        
+        # 2. Procura pelo token no banco de dados
+        response = conn.table("auth_tokens").select("*").eq("token_hash", token_hash).execute()
+        
+        if not response.data:
+            st.error("Token de acesso inválido ou não encontrado.")
+            return False, None
+        
+        token_data = response.data[0]
+        
+        # 3. Verifica se o token já foi utilizado
+        if token_data["is_used"]:
+            st.error("Este link de acesso já foi utilizado e não é mais válido.")
+            return False, None
+            
+        # 4. Verifica se o token expirou
+        expires_at = datetime.fromisoformat(token_data["expires_at"])
+        if datetime.now(timezone.utc) > expires_at:
+            st.error("O link de acesso expirou. Por favor, gere um novo no portal.")
+            return False, None
+            
+        # 5. Se tudo estiver correto, marca o token como usado (consumido)
+        conn.table("auth_tokens").update({"is_used": True}).eq("id", token_data["id"]).execute()
+        
+        user_email = token_data["user_email"]
+        return True, user_email
+        
+    except Exception as e:
+        st.error(f"Ocorreu um erro crítico durante a validação do acesso: {e}")
+        return False, None
+
+# --- Lógica Principal de Autenticação ---
+query_params = st.query_params
+token = query_params.get("access_token")
+
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+
+if token and not st.session_state.authenticated:
+    time.sleep(1) # <<< PAUSA ESTRATÉGICA PARA EVITAR RACE CONDITION
+    is_valid, email = verify_and_consume_nonce(token)
+    if is_valid:
+        st.session_state.authenticated = True
+        st.session_state.user_email = email
+
+# --- Barreira de Acesso ---
+if not st.session_state.get('authenticated'):
+    st.title("🔐 Acesso Restrito")
+    st.error("Este aplicativo requer autenticação. Por favor, faça o login através do portal.")
+    
+    st.link_button(
+        "Ir para o Portal de Login",
+        "https://app-unificadopy-j9wgzbt2sqm5pgaeqzxyme.streamlit.app/",
+        use_container_width=True,
+        type="primary"
+    )
+    st.stop()
+
+# =============================================================================
+# ===== FIM DO CÓDIGO DE PROTEÇÃO =============================================
+# =============================================================================
+
+
+
+
+
+
 # =============================================================================
 # ===== INÍCIO DO CÓDIGO DE PROTEÇÃO PADRÃO ===================================
 # =============================================================================
