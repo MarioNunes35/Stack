@@ -9,4 +9,4 @@ flask
 kaleido
 openpyxl
 statsmodels
-
+st-supabase-connection
