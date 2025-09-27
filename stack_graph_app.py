@@ -76,7 +76,7 @@ if not st.session_state.get('authenticated'):
     
     st.link_button(
         "Ir para o Portal de Login",
-        "https://app-unificadopy-j9wgzbt2sqm5pgaeqzxyme.streamlit.app/",
+        "https://huggingface.co/spaces/MarioNunes34/Portal",
         use_container_width=True,
         type="primary"
     )
